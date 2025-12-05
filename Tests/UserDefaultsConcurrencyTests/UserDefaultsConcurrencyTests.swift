@@ -49,30 +49,44 @@ final class UserDefaultsConcurrencyTests: XCTestCase {
     }
     
     func testConcurrentAccessToVisitorIDIsConsistent() async throws {
-        let numberOfTasks = 1000
+        let numberOfTasks = 10000
         
-        let collectedIDs = await withTaskGroup(of: UUID.self) { group in
-            for _ in 1...numberOfTasks {
-                group.addTask {
-                    // Add slight delay to increase likelihood of race condition
-                    try? await Task.sleep(nanoseconds: UInt64.random(in: 0...1000))
-                    return UserDefaultsConcurrency.visitorID()
-                }
+        // Use actor to safely collect results
+        actor ResultCollector {
+            var ids: [UUID] = []
+            
+            func add(_ id: UUID) {
+                ids.append(id)
             }
             
-            var results: [UUID] = []
-            for await result in group {
-                results.append(result)
+            func getResults() -> [UUID] {
+                return ids
             }
-            return results
         }
+        
+        let collector = ResultCollector()
+        
+        // Create many unstructured detached tasks that can truly run in parallel
+        let tasks = (1...numberOfTasks).map { _ in
+            Task.detached {
+                let id = UserDefaultsConcurrency.visitorID()
+                await collector.add(id)
+            }
+        }
+        
+        // Wait for all to complete
+        for task in tasks {
+            await task.value
+        }
+        
+        let collectedIDs = await collector.getResults()
         
         // All tasks should have received the same UUID
         let uniqueIDs = Set(collectedIDs)
         print("Collected \(collectedIDs.count) IDs, found \(uniqueIDs.count) unique values")
         
         if uniqueIDs.count > 1 {
-            print("⚠️ Race condition detected! Different UDs generated:")
+            print("⚠️ Race condition detected! Different UUIDs generated:")
             for (index, id) in uniqueIDs.enumerated() {
                 let count = collectedIDs.filter { $0 == id }.count
                 print("  ID \(index + 1): \(id) (appeared \(count) times)")
